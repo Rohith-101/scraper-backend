@@ -4,13 +4,11 @@ import os
 import json
 import gspread
 from datetime import datetime
-import urllib.parse
 
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from scrapingbee import ScrapingBeeClient
-from bs4 import BeautifulSoup
+from serpapi import GoogleSearch
 
 # --- Configuration & App Initialization ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -28,11 +26,11 @@ class ScrapeRequest(BaseModel):
     query: str
 
 def run_scraper(search_query: str):
-    logging.info(f"CORRECTED SCRAPINGBEE SCRAPER STARTED for query: '{search_query}'")
+    logging.info(f"FINAL - SERPAPI SCRAPER STARTED for query: '{search_query}'")
     try:
         # Get secrets from Render's environment variables
         SHEET_NAME = os.environ["SHEET_NAME"]
-        SCRAPINGBEE_API_KEY = os.environ["SCRAPINGBEE_API_KEY"]
+        SERPAPI_KEY = os.environ["SERPAPI_KEY"]
         google_creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
         google_creds_dict = json.loads(google_creds_json)
     except KeyError as e:
@@ -50,56 +48,40 @@ def run_scraper(search_query: str):
         logging.error(f"G-Sheets connection failed: {e}")
         return
 
+    # --- SerpApi Scraping Logic ---
     scraped_data = []
     try:
-        client = ScrapingBeeClient(api_key=SCRAPINGBEE_API_KEY)
-        
-        # --- Create a valid, full Google Maps URL ---
-        encoded_query = urllib.parse.quote_plus(search_query)
-        url = f"https://www.google.com/maps/search/{encoded_query}"
-        logging.info(f"Requesting URL: {url}")
+        params = {
+            "api_key": SERPAPI_KEY,
+            "engine": "google_maps",
+            "q": search_query,
+            "ll": "@13.0827,80.2707,15z", # Latitude/Longitude for Chennai
+            "type": "search",
+            "google_domain": "google.co.in",
+            "hl": "en",
+        }
 
-        # --- Make the API call to ScrapingBee ---
-        response = client.get(url, params={'render_js': True, 'country_code': 'in'})
+        search = GoogleSearch(params)
+        results = search.get_dict()
         
-        if response.status_code != 200:
-            logging.error(f"ScrapingBee failed with status {response.status_code}")
-            return
+        local_results = results.get("local_results", [])
+        logging.info(f"SerpApi returned {len(local_results)} results.")
 
-        # --- Parse the HTML response ---
-        soup = BeautifulSoup(response.content, "lxml")
-        
-        # Find all link elements that are business results
-        results = soup.select('a[href^="https://www.google.com/maps/place/"]')
-        logging.info(f"Found {len(results)} potential listings in the HTML.")
-
-        for result in results:
-            name = result.get('aria-label')
+        for result in local_results:
+            name = result.get("title")
             if not name or name in existing_data:
                 continue
 
-            # Find the parent container for the result's text details
-            parent_div = result.find_parent('div', class_=lambda x: x and x.startswith('Nv2PK'))
-            if not parent_div:
-                continue
-
-            # Extract and clean up the text block
-            details_text = parent_div.text
-            parts = [p.strip() for p in details_text.split('·') if p.strip()]
-            rating, reviews, category = "N/A", "0", "N/A"
-
-            if len(parts) > 0 and parts[0] and parts[0][0].isdigit():
-                rating_info = parts[0].split()
-                rating = rating_info[0]
-                if len(rating_info) > 1:
-                    reviews = rating_info[1].replace('(', '').replace(')', '')
-            
-            if len(parts) > 1:
-                category = parts[1]
+            category = result.get("type", "N/A")
+            address = result.get("address", "N/A")
+            rating = result.get("rating", "N/A")
+            reviews = result.get("reviews", 0)
+            website = result.get("website", "N/A")
+            phone = result.get("phone", "N/A")
 
             business_data = [
-                name, category, "N/A", str(rating), str(reviews),
-                "N/A", "N/A", datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                name, category, address, str(rating), str(reviews),
+                website, phone, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ]
             scraped_data.append(business_data)
             existing_data.add(name)
@@ -117,7 +99,7 @@ def run_scraper(search_query: str):
 @app.post("/scrape")
 async def scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_scraper, request.query)
-    return {"message": "ScrapingBee job started. Check your Google Sheet for results."}
+    return {"message": "SerpApi job started. This will be very fast. Check your Google Sheet for results."}
 
 @app.get("/")
 def read_root():
