@@ -3,6 +3,4 @@ uvicorn
 gspread
 google-auth-oauthlib
 pydantic
-scrapingbee
-beautifulsoup4
-lxml
+google-search-results
