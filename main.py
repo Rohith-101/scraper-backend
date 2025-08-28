@@ -55,35 +55,26 @@ def run_scraper(search_query: str):
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    # Add a more common user agent
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
     
     driver = webdriver.Chrome(options=chrome_options)
     
     scraped_data = []
     try:
-        #
-        # ===== NEW STRATEGY TO HANDLE CONSENT SCREEN =====
-        #
         logging.info("Navigating to google.com to handle consent screen...")
         driver.get("https://www.google.com")
-        time.sleep(2) # Allow time for the page and consent dialog to load
+        time.sleep(2)
 
         try:
-            # Look for a button with the text "Accept all" or similar and click it
-            # This uses a robust XPath selector to find a button with specific text
             accept_button_xpath = "//button[.//span[contains(text(), 'Accept all')]] | //button[contains(text(), 'Accept all')] | //div[contains(text(), 'Accept all')]"
             accept_button = WebDriverWait(driver, 5).until(
                 EC.element_to_be_clickable((By.XPATH, accept_button_xpath))
             )
             accept_button.click()
             logging.info("Clicked the 'Accept all' button.")
-            time.sleep(2) # Wait for the click to process
+            time.sleep(2)
         except Exception:
             logging.info("No 'Accept all' button was found. Proceeding assuming no consent screen.")
-        #
-        # ===== END OF NEW STRATEGY =====
-        #
 
         logging.info(f"Navigating to Google Maps search for: '{search_query}'")
         url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}"
@@ -92,38 +83,56 @@ def run_scraper(search_query: str):
         wait = WebDriverWait(driver, 20)
         feed_selector = '[role="feed"]'
         
-        # Wait until the main container for results is present
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, feed_selector)))
         logging.info("Main results container '[role=\"feed\"]' found.")
         
         scrollable_div = driver.find_element(By.CSS_SELECTOR, feed_selector)
-        for _ in range(5): # Scroll 5 times
+        for _ in range(5):
             driver.execute_script('arguments[0].scrollTop = arguments[0].scrollHeight', scrollable_div)
             time.sleep(2)
 
         results = driver.find_elements(By.CSS_SELECTOR, f'{feed_selector} > div > div > a')
         logging.info(f"Found {len(results)} potential business listings on the page.")
 
+        #
+        # ===== UPDATED EXTRACTION LOGIC =====
+        #
         for result in results[:50]:
             try:
-                name = result.find_element(By.CSS_SELECTOR, 'div.font-medium').text
-                if not name or name in existing_data: continue
+                # Use the aria-label of the link, which is a more reliable way to get the name
+                name = result.get_attribute('aria-label')
                 
+                if not name or name in existing_data:
+                    continue
+                
+                # The rest of the details are still parsed from the text block
                 details = result.text.split('\n')
                 rating, reviews, category, address = 'N/A', '0', 'N/A', 'N/A'
+                
                 if len(details) > 1 and details[1] and details[1][0].isdigit():
-                    parts = details[1].split(' '); rating = parts[0]
-                    if len(parts) > 1 and '(' in parts[1]: reviews = parts[1].replace('(', '').replace(')', '').replace(',', '')
+                    parts = details[1].split(' ')
+                    rating = parts[0]
+                    if len(parts) > 1 and '(' in parts[1]:
+                        reviews = parts[1].replace('(', '').replace(')', '').replace(',', '')
+                
                 for line in details[2:]:
                     if '·' in line:
-                        parts = line.split('·'); category = parts[0].strip(); address = parts[1].strip() if len(parts) > 1 else 'N/A'
+                        parts = line.split('·')
+                        category = parts[0].strip()
+                        if len(parts) > 1:
+                            address = parts[1].strip()
                         break
 
                 business_data = [name, category, address, rating, reviews, "N/A", "N/A", datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
                 scraped_data.append(business_data)
                 existing_data.add(name)
-            except Exception:
+                logging.info(f"Successfully extracted: {name}")
+            except Exception as e:
+                logging.warning(f"Could not parse a business listing. Error: {e}. Text was: {result.text}")
                 continue
+        #
+        # ===== END OF UPDATED LOGIC =====
+        #
     
     except Exception as e:
         logging.error(f"An unexpected error occurred during scraping: {e}", exc_info=True)
