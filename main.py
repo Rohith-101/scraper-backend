@@ -4,6 +4,7 @@ import os
 import json
 import gspread
 from datetime import datetime
+import urllib.parse
 
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
@@ -54,7 +55,8 @@ def run_scraper(search_query: str):
         #
         # ===== CORRECTED URL GENERATION =====
         #
-        url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}"
+        encoded_query = urllib.parse.quote_plus(search_query)
+        url = f"https://www.google.com/maps/search/{encoded_query}"
         logging.info(f"Requesting URL: {url}")
         #
         # ====================================
@@ -68,7 +70,6 @@ def run_scraper(search_query: str):
 
         soup = BeautifulSoup(response.content, "lxml")
         
-        # This selector is more robust for the new URL structure
         results = soup.select('a[href^="https://www.google.com/maps/place/"]')
         logging.info(f"Found {len(results)} potential listings in the HTML.")
 
@@ -77,18 +78,15 @@ def run_scraper(search_query: str):
             if not name or name in existing_data:
                 continue
 
-            # Find the parent div containing all details for this result
-            parent_div = result.find_parent('div', class_=lambda x: x and x.startswith('Nv2PK'))
+            parent_div = result.find_parent('div', jsaction=lambda x: x and x.startswith('mouseover:pane'))
             if not parent_div:
                 continue
 
             details_text = parent_div.text
-            
-            # Simple parsing of the text block
             parts = [p.strip() for p in details_text.split('·') if p.strip()]
             rating, reviews, category = "N/A", "0", "N/A"
 
-            if len(parts) > 0 and parts[0][0].isdigit():
+            if len(parts) > 0 and parts[0] and parts[0][0].isdigit():
                 rating_info = parts[0].split()
                 rating = rating_info[0]
                 if len(rating_info) > 1:
