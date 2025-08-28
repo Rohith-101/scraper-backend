@@ -32,16 +32,8 @@ app.add_middleware(
 class ScrapeRequest(BaseModel):
     query: str
 
-def get_detail(driver, selector):
-    """Safely gets text from an element, returning 'N/A' if not found."""
-    try:
-        element = driver.find_element(By.CSS_SELECTOR, selector)
-        return element.text
-    except NoSuchElementException:
-        return "N/A"
-
 def run_scraper(search_query: str):
-    logging.info(f"OPTIMIZED SCRAPER STARTED for query: '{search_query}'")
+    logging.info(f"ROBUST SCRAPER STARTED for query: '{search_query}'")
     try:
         SHEET_NAME = os.environ["SHEET_NAME"]
         google_creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
@@ -64,85 +56,73 @@ def run_scraper(search_query: str):
     chrome_options.add_argument("--headless")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
-    #
-    # ===== SPEED OPTIMIZATION: DISABLE IMAGES =====
-    #
+    chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/108.0.0.0 Safari/537.36")
     chrome_options.add_argument("--blink-settings=imagesEnabled=false")
-    #
-    # ===============================================
-    #
+    
     driver = webdriver.Chrome(options=chrome_options)
     
     scraped_data = []
     try:
-        driver.get("https://www.google.com")
-        time.sleep(2)
-        try:
-            accept_button = driver.find_element(By.XPATH, "//div[contains(text(), 'Accept all')]")
-            accept_button.click()
-            time.sleep(2)
-        except Exception:
-            logging.info("No consent button found.")
-
-        url = f"http://googleusercontent.com/maps/google.com/0{search_query.replace(' ', '+')}"
+        # Using a more direct maps URL
+        url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}"
+        logging.info(f"Navigating to: {url}")
         driver.get(url)
 
-        wait = WebDriverWait(driver, 20)
-        feed_selector = '[role="feed"]'
+        wait = WebDriverWait(driver, 30) # Increased wait time to 30 seconds
         
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, feed_selector)))
+        #
+        # ===== NEW ERROR HANDLING BLOCK =====
+        #
+        feed_selector = '[role="feed"]'
+        try:
+            # Wait for the main container for results to be present
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, feed_selector)))
+            logging.info("Main results container '[role=\"feed\"]' found.")
+        except TimeoutException:
+            logging.error("TimeoutException: The results container was not found. The page might be a CAPTCHA.")
+            # Log the entire page source for debugging
+            logging.info("--- PAGE SOURCE START ---")
+            logging.info(driver.page_source)
+            logging.info("--- PAGE SOURCE END ---")
+            driver.quit()
+            return # Exit the function
+        #
+        # ===== END OF NEW BLOCK =====
+        #
         
         scrollable_div = driver.find_element(By.CSS_SELECTOR, feed_selector)
-        for _ in range(3):
+        for _ in range(5):
             driver.execute_script('arguments[0].scrollTop = arguments[0].scrollHeight', scrollable_div)
-            time.sleep(3)
+            time.sleep(2)
 
-        results_links = driver.find_elements(By.CSS_SELECTOR, f'{feed_selector} > div > div > a')
-        listing_urls = [link.get_attribute('href') for link in results_links]
-        logging.info(f"Found {len(listing_urls)} business listings to process.")
+        results = driver.find_elements(By.CSS_SELECTOR, f'{feed_selector} > div > div > a')
+        logging.info(f"Found {len(results)} potential business listings on the page.")
 
-        for i, url in enumerate(listing_urls[:30]):
-            driver.get(url)
-            
+        for result in results[:50]:
             try:
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'h1')))
-            except TimeoutException:
-                logging.warning(f"Skipping listing, timed out waiting for detail page: {url}")
-                continue
+                name = result.get_attribute('aria-label')
+                if not name or name in existing_data:
+                    continue
+                
+                details = result.text.split('\n')
+                rating, reviews, category, address = 'N/A', '0', 'N/A', 'N/A'
+                
+                if len(details) > 1 and details[1] and details[1][0].isdigit():
+                    parts = details[1].split(' '); rating = parts[0]
+                    if len(parts) > 1 and '(' in parts[1]: reviews = parts[1].replace('(', '').replace(')', '').replace(',', '')
+                
+                for line in details[2:]:
+                    if '·' in line:
+                        parts = line.split('·'); category = parts[0].strip(); address = parts[1].strip() if len(parts) > 1 else 'N/A'
+                        break
 
-            name = driver.find_element(By.CSS_SELECTOR, 'h1').text
-            if not name or name in existing_data:
-                logging.info(f"Skipping duplicate or invalid name: {name}")
-                continue
-            
-            address = get_detail(driver, '[data-item-id="address"]')
-            website = get_detail(driver, '[data-item-id="authority"]')
-            phone = get_detail(driver, '[data-item-id^="phone"]')
-            
-            category, reviews_text, rating_text = "N/A", "0", "N/A"
-            try:
-                category = driver.find_element(By.CSS_SELECTOR, '[jsaction="pane.rating.category"]').text
-                rating_container = driver.find_element(By.CSS_SELECTOR, '[jsaction="pane.rating.moreReviews"]')
-                rating_label = rating_container.get_attribute('aria-label')
-                if rating_label and "stars" in rating_label:
-                    parts = rating_label.replace('stars', '').strip().split(' ')
-                    rating_text = parts[0]
-                    if len(parts) > 1:
-                        reviews_text = parts[-1].replace('Reviews', '').strip()
+                business_data = [name, category, address, rating, reviews, "N/A", "N/A", datetime.now().strftime("%Y-%m-%d %H:%M:%S")]
+                scraped_data.append(business_data)
+                existing_data.add(name)
+                logging.info(f"Successfully extracted: {name}")
             except Exception:
-                pass
-
-            business_data = [
-                name, category, address, rating_text, reviews_text,
-                website, phone, datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            ]
-            scraped_data.append(business_data)
-            existing_data.add(name)
-            logging.info(f"({i+1}/{len(listing_urls)}) Successfully scraped: {name}")
-            
-            time.sleep(1)
-
+                continue
+    
     except Exception as e:
         logging.error(f"An unexpected error occurred: {e}", exc_info=True)
     finally:
@@ -157,7 +137,7 @@ def run_scraper(search_query: str):
 @app.post("/scrape")
 async def scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_scraper, request.query)
-    return {"message": "Optimized scraping job started. This may still take several minutes."}
+    return {"message": "Robust scraping job started. Check your Google Sheet for results shortly."}
 
 @app.get("/")
 def read_root():
