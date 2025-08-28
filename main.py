@@ -1,5 +1,4 @@
 # main.py
-# main.py
 import logging
 import os
 import json
@@ -42,7 +41,7 @@ def get_detail(driver, selector):
         return "N/A"
 
 def run_scraper(search_query: str):
-    logging.info(f"ADVANCED SCRAPER STARTED for query: '{search_query}'")
+    logging.info(f"OPTIMIZED SCRAPER STARTED for query: '{search_query}'")
     try:
         SHEET_NAME = os.environ["SHEET_NAME"]
         google_creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
@@ -66,12 +65,17 @@ def run_scraper(search_query: str):
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/5.37.36 (KHTML, like Gecko) Chrome/98.0.4758.102 Safari/537.36")
-    
+    #
+    # ===== SPEED OPTIMIZATION: DISABLE IMAGES =====
+    #
+    chrome_options.add_argument("--blink-settings=imagesEnabled=false")
+    #
+    # ===============================================
+    #
     driver = webdriver.Chrome(options=chrome_options)
     
     scraped_data = []
     try:
-        # Consent Screen Handling
         driver.get("https://www.google.com")
         time.sleep(2)
         try:
@@ -81,8 +85,7 @@ def run_scraper(search_query: str):
         except Exception:
             logging.info("No consent button found.")
 
-        # Search on Google Maps
-        url = f"https://www.google.com/maps/search/{search_query.replace(' ', '+')}"
+        url = f"http://googleusercontent.com/maps/google.com/0{search_query.replace(' ', '+')}"
         driver.get(url)
 
         wait = WebDriverWait(driver, 20)
@@ -90,25 +93,22 @@ def run_scraper(search_query: str):
         
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, feed_selector)))
         
-        # Scroll to load more results
         scrollable_div = driver.find_element(By.CSS_SELECTOR, feed_selector)
-        for _ in range(3): # Scroll a few times
+        for _ in range(3):
             driver.execute_script('arguments[0].scrollTop = arguments[0].scrollHeight', scrollable_div)
             time.sleep(3)
 
-        # Get all result links
         results_links = driver.find_elements(By.CSS_SELECTOR, f'{feed_selector} > div > div > a')
         listing_urls = [link.get_attribute('href') for link in results_links]
         logging.info(f"Found {len(listing_urls)} business listings to process.")
 
-        for i, url in enumerate(listing_urls[:30]): # Limit to 30 to prevent long runtimes
+        for i, url in enumerate(listing_urls[:30]):
             driver.get(url)
             
-            # Wait for a unique element on the detail page to load, like the headline
             try:
                 wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'h1')))
             except TimeoutException:
-                logging.warning(f"Skipping listing, timed out waiting for detail page to load: {url}")
+                logging.warning(f"Skipping listing, timed out waiting for detail page: {url}")
                 continue
 
             name = driver.find_element(By.CSS_SELECTOR, 'h1').text
@@ -116,19 +116,13 @@ def run_scraper(search_query: str):
                 logging.info(f"Skipping duplicate or invalid name: {name}")
                 continue
             
-            # Scrape details using robust data-item-id selectors
             address = get_detail(driver, '[data-item-id="address"]')
             website = get_detail(driver, '[data-item-id="authority"]')
-            phone = get_detail(driver, '[data-item-id^="phone"]') # Starts with "phone"
+            phone = get_detail(driver, '[data-item-id^="phone"]')
             
-            # Category and reviews need to be found differently
-            category = "N/A"
-            reviews_text = "0"
-            rating_text = "N/A"
+            category, reviews_text, rating_text = "N/A", "0", "N/A"
             try:
-                # Get category from the button element
                 category = driver.find_element(By.CSS_SELECTOR, '[jsaction="pane.rating.category"]').text
-                # Get rating and reviews from the aria-label of the star rating container
                 rating_container = driver.find_element(By.CSS_SELECTOR, '[jsaction="pane.rating.moreReviews"]')
                 rating_label = rating_container.get_attribute('aria-label')
                 if rating_label and "stars" in rating_label:
@@ -137,7 +131,7 @@ def run_scraper(search_query: str):
                     if len(parts) > 1:
                         reviews_text = parts[-1].replace('Reviews', '').strip()
             except Exception:
-                pass # Ignore if rating/category not found
+                pass
 
             business_data = [
                 name, category, address, rating_text, reviews_text,
@@ -147,11 +141,10 @@ def run_scraper(search_query: str):
             existing_data.add(name)
             logging.info(f"({i+1}/{len(listing_urls)}) Successfully scraped: {name}")
             
-            # A small delay is crucial to avoid getting blocked
             time.sleep(1)
 
     except Exception as e:
-        logging.error(f"An unexpected error occurred during scraping: {e}", exc_info=True)
+        logging.error(f"An unexpected error occurred: {e}", exc_info=True)
     finally:
         driver.quit()
 
@@ -164,7 +157,7 @@ def run_scraper(search_query: str):
 @app.post("/scrape")
 async def scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_scraper, request.query)
-    return {"message": "Advanced scraping job started. This will take several minutes. Please check your Google Sheet for results."}
+    return {"message": "Optimized scraping job started. This may still take several minutes."}
 
 @app.get("/")
 def read_root():
