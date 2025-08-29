@@ -16,7 +16,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # Allows your frontend to communicate with this backend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,8 +26,9 @@ class ScrapeRequest(BaseModel):
     query: str
 
 def run_scraper(search_query: str):
-    logging.info(f"STATEFUL Scraper Started for query: '{search_query}'")
+    logging.info(f"STATELESS Scraper Started for query: '{search_query}'")
     try:
+        # Load secrets securely from environment variables
         SHEET_NAME = os.environ["SHEET_NAME"]
         SERPAPI_KEY = os.environ["SERPAPI_KEY"]
         google_creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
@@ -37,37 +38,37 @@ def run_scraper(search_query: str):
         return
 
     try:
+        # Connect to your Google Sheet
         gc = gspread.service_account_from_dict(google_creds_dict)
         spreadsheet = gc.open(SHEET_NAME)
-        data_worksheet = spreadsheet.worksheet("Data")
-        state_worksheet = spreadsheet.worksheet("State") # Access our new State sheet
-        existing_data = set(data_worksheet.col_values(1)[1:])
-        logging.info(f"Connected to G-Sheet. Found {len(existing_data)} existing entries.")
+        worksheet = spreadsheet.worksheet("Data")
+        # Duplicate Detection: Read all existing business names
+        existing_data = set(worksheet.col_values(1)[1:])
+        start_index = len(existing_data) # Calculate starting point
+        logging.info(f"Connected to G-Sheet. Found {start_index} existing entries. Will start search from this index.")
     except Exception as e:
         logging.error(f"G-Sheets connection failed: {e}")
         return
 
+    # --- SerpApi Scraping Logic with Pagination ---
     scraped_data = []
     
-    # --- State Management: Read the starting point ---
-    next_page_url = state_worksheet.acell('A2').value
+    params = {
+        "api_key": SERPAPI_KEY,
+        "engine": "google_maps",
+        "q": search_query,
+        "ll": "@13.0827,80.2707,15z", # Latitude/Longitude for Chennai
+        "type": "search",
+        "google_domain": "google.co.in",
+        "hl": "en",
+        "start": start_index # Tell the API where to start the search
+    }
     
-    if next_page_url:
-        logging.info(f"Resuming scrape from saved URL: {next_page_url}")
-        # If we have a saved URL, we use it directly
-        search = GoogleSearch.from_link(next_page_url, api_key=SERPAPI_KEY)
-    else:
-        logging.info("Starting a new scrape from page 1.")
-        # Otherwise, start a fresh search
-        params = {
-            "api_key": SERPAPI_KEY, "engine": "google_maps", "q": search_query,
-            "ll": "@13.0827,80.2707,15z", "type": "search",
-            "google_domain": "google.co.in", "hl": "en",
-        }
-        search = GoogleSearch(params)
+    search = GoogleSearch(params)
     
     page_num = 0
     while True:
+        # Stop if we have successfully scraped 10 pages in this run
         if page_num >= 10:
             logging.info("Reached the 10-page limit for this run.")
             break
@@ -78,14 +79,17 @@ def run_scraper(search_query: str):
         
         local_results = results.get("local_results", [])
         if not local_results:
-            logging.info("No more results found.")
+            logging.info("No more results found on this page.")
             break
+
+        logging.info(f"Found {len(local_results)} results on this page.")
 
         for result in local_results:
             name = result.get("title")
-            if not name or name in existing_data: continue
+            if not name or name in existing_data:
+                continue
 
-            # Extract all detailed columns
+            # Extract all the detailed columns
             category = result.get("type", "N/A"); address = result.get("address", "N/A")
             rating = result.get("rating", "N/A"); reviews = result.get("reviews", 0)
             website = result.get("website", "N/A"); phone = result.get("phone", "N/A")
@@ -102,29 +106,25 @@ def run_scraper(search_query: str):
             scraped_data.append(business_data)
             existing_data.add(name)
 
-        # --- State Management: Save the next starting point ---
-        pagination = results.get("serpapi_pagination", {})
-        if "next" in pagination:
-            next_page_to_save = pagination["next"]
-            state_worksheet.update('A2', next_page_to_save)
-            logging.info(f"Saved next page URL to State sheet: {next_page_to_save}")
-            search.params_dict.update(pagination) # Prepare for the next loop iteration
-        else:
-            state_worksheet.update('A2', '') # Clear the state if we're on the last page
-            logging.info("Reached the last page of results. Cleared state for next run.")
+        # Check if SerpApi has provided a link to the next page of results
+        if "next" not in results.get("serpapi_pagination", {}):
+            logging.info("Reached the last page of results.")
             break
+        
+        # Prepare the search for the next page
+        search.params_dict.update(results.get("serpapi_pagination"))
 
     if scraped_data:
         logging.info(f"Total new businesses to add in this run: {len(scraped_data)}")
-        data_worksheet.append_rows(scraped_data, value_input_option='RAW')
-        logging.info(f"SUCCESS: Appended {len(scraped_data)} new rows to G-Sheet.")
+        worksheet.append_rows(scraped_data, value_input_option='RAW')
+        logging.info(f"SUCCESS: Appended {len(scraped_data)} new detailed rows to G-Sheet.")
     else:
         logging.info("No new data was found to append in this run.")
 
 @app.post("/scrape")
 async def scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_scraper, request.query)
-    return {"message": "Stateful scraping job started. Check your Google Sheet for results."}
+    return {"message": "Stateless scraping job started. Check your Google Sheet for results."}
 
 @app.get("/")
 def read_root():
