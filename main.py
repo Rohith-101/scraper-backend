@@ -16,7 +16,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["*"], # Allows your frontend to communicate with this backend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -26,9 +26,9 @@ class ScrapeRequest(BaseModel):
     query: str
 
 def run_scraper(search_query: str):
-    logging.info(f"PAGINATED SerpApi Scraper Started for query: '{search_query}'")
+    logging.info(f"LIMITED (10 PAGE) SerpApi Scraper Started for query: '{search_query}'")
     try:
-        # Get secrets from Render's environment variables
+        # Load secrets securely from environment variables
         SHEET_NAME = os.environ["SHEET_NAME"]
         SERPAPI_KEY = os.environ["SERPAPI_KEY"]
         google_creds_json = os.environ["GOOGLE_CREDENTIALS_JSON"]
@@ -38,10 +38,11 @@ def run_scraper(search_query: str):
         return
 
     try:
-        # Connect to Google Sheets
+        # Connect to your Google Sheet
         gc = gspread.service_account_from_dict(google_creds_dict)
         spreadsheet = gc.open(SHEET_NAME)
         worksheet = spreadsheet.worksheet("Data")
+        # Duplicate Detection: Read all existing business names to prevent re-adding
         existing_data = set(worksheet.col_values(1)[1:])
         logging.info(f"Connected to G-Sheet. Found {len(existing_data)} existing entries.")
     except Exception as e:
@@ -65,8 +66,13 @@ def run_scraper(search_query: str):
     
     page_num = 0
     while True:
+        # Stop if we have successfully scraped 10 pages
+        if page_num >= 10:
+            logging.info("Reached the 10-page limit for this run.")
+            break
+            
         page_num += 1
-        logging.info(f"Scraping page {page_num}...")
+        logging.info(f"Scraping page {page_num} of a maximum of 10...")
         results = search.get_dict()
         
         local_results = results.get("local_results", [])
@@ -81,6 +87,7 @@ def run_scraper(search_query: str):
             if not name or name in existing_data:
                 continue
 
+            # Extract all the detailed columns
             category = result.get("type", "N/A")
             address = result.get("address", "N/A")
             rating = result.get("rating", "N/A")
@@ -103,26 +110,26 @@ def run_scraper(search_query: str):
             scraped_data.append(business_data)
             existing_data.add(name)
 
-        # Check if there is a next page to scrape
+        # Check if SerpApi has provided a link to the next page of results
         if "next" not in results.get("serpapi_pagination", {}):
             logging.info("Reached the last page of results.")
             break
         
-        # Prepare for the next page search
+        # Prepare the search for the next page
         search.params_dict.update(results.get("serpapi_pagination"))
 
-
     if scraped_data:
-        logging.info(f"Total new businesses to add: {len(scraped_data)}")
+        logging.info(f"Total new businesses to add in this run: {len(scraped_data)}")
+        # Use value_input_option='RAW' to prevent Google Sheets from interpreting phone numbers as formulas
         worksheet.append_rows(scraped_data, value_input_option='RAW')
         logging.info(f"SUCCESS: Appended {len(scraped_data)} new detailed rows to G-Sheet.")
     else:
-        logging.info("No new data was found to append across all pages.")
+        logging.info("No new data was found to append in this run.")
 
 @app.post("/scrape")
 async def scrape(request: ScrapeRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(run_scraper, request.query)
-    return {"message": "Paginated scraping job started. Check your Google Sheet for results."}
+    return {"message": "Limited (10 page) scraping job started. Check your Google Sheet for results."}
 
 @app.get("/")
 def read_root():
