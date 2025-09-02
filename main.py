@@ -42,10 +42,11 @@ def run_scraper(search_query: str):
         gc = gspread.service_account_from_dict(google_creds_dict)
         spreadsheet = gc.open(SHEET_NAME)
         worksheet = spreadsheet.worksheet("Data")
-        # Duplicate Detection: Read all existing business names
+        # Duplicate Detection: Read all existing business names for fast checking
         existing_data = set(worksheet.col_values(1)[1:])
-        start_index = len(existing_data) # Calculate starting point
-        logging.info(f"Connected to G-Sheet. Found {start_index} existing entries. Will start search from this index.")
+        
+        # CORRECTED: Log the number of existing entries, but don't use it to start the search
+        logging.info(f"Connected to G-Sheet. Found {len(existing_data)} existing entries.")
     except Exception as e:
         logging.error(f"G-Sheets connection failed: {e}")
         return
@@ -57,27 +58,30 @@ def run_scraper(search_query: str):
         "api_key": SERPAPI_KEY,
         "engine": "google_maps",
         "q": search_query,
-        "ll": "@13.0827,80.2707,15z", # Latitude/Longitude for Chennai
+        "ll": "@13.0827,80.2707,15z", # Latitude/Longitude for Chennai, India
         "type": "search",
         "google_domain": "google.co.in",
         "hl": "en",
-        "start": start_index # Tell the API where to start the search
+        # REMOVED: The "start" parameter is no longer needed here
     }
     
     search = GoogleSearch(params)
     
     page_num = 0
+    # Loop to handle multiple pages of results
     while True:
-        # Stop if we have successfully scraped 10 pages in this run
+        # Safety break to prevent infinite loops and excessive API usage
         if page_num >= 10:
             logging.info("Reached the 10-page limit for this run.")
             break
             
         page_num += 1
         logging.info(f"Scraping page batch #{page_num}...")
+        
         results = search.get_dict()
         
         local_results = results.get("local_results", [])
+        
         if not local_results:
             logging.info("No more results found on this page.")
             break
@@ -86,16 +90,17 @@ def run_scraper(search_query: str):
 
         for result in local_results:
             name = result.get("title")
+
+            # Skip if the business has no name or already exists in our sheet
             if not name or name in existing_data:
                 continue
 
-            # Extract all the detailed columns
             category = result.get("type", "N/A"); address = result.get("address", "N/A")
             rating = result.get("rating", "N/A"); reviews = result.get("reviews", 0)
             website = result.get("website", "N/A"); phone = result.get("phone", "N/A")
-            price_level = result.get("price", "N/A"); operating_hours = result.get("operating_hours", {}).get("wednesday", "N/A")
-            service_options_list = [k for k, v in result.get("service_options", {}).items() if v]
-            service_options = ", ".join(service_options_list) if service_options_list else "N/A"
+            price_level = result.get("price", "N/A")
+            operating_hours = json.dumps(result.get("operating_hours", {}))
+            service_options = json.dumps(result.get("service_options", {}))
             gps_coordinates = result.get("gps_coordinates", {}); latitude = gps_coordinates.get("latitude", "N/A"); longitude = gps_coordinates.get("longitude", "N/A")
 
             business_data = [
@@ -104,7 +109,7 @@ def run_scraper(search_query: str):
                 str(latitude), str(longitude), datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             ]
             scraped_data.append(business_data)
-            existing_data.add(name)
+            existing_data.add(name) # Add to set to avoid duplicates within the same run
 
         # Check if SerpApi has provided a link to the next page of results
         if "next" not in results.get("serpapi_pagination", {}):
